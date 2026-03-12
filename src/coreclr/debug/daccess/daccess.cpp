@@ -2134,41 +2134,65 @@ DacInstanceManager::DumpAllInstances(
     DAC_INSTANCE*   inst;
     UINT            cbTotal = 0;
 
-#if defined(DAC_MEASURE_PERF)
-   FILE* fp = fopen("c:\\dumpLog.txt", "a");
-#endif // #if defined(DAC_MEASURE_PERF)
+    // Collect all reportable regions into a flat array, then sort and coalesce
+    // adjacent/overlapping entries before reporting. This dramatically reduces
+    // the number of EnumMemoryRegion callbacks (and thus cross-process
+    // GetValidVirtualRange calls in dbgcore's GenAddMemoryBlock).
 
-#if defined(DAC_MEASURE_PERF)
-   int numInBucket = 0;
-#endif // #if defined(DAC_MEASURE_PERF)
+    struct MemRange
+    {
+        TADDR start;
+        ULONG32 size;
+    };
 
-   DacInstanceHashIterator end = m_hash.end();
-   for (DacInstanceHashIterator cur = m_hash.begin(); end != cur; ++cur)
-   {
-       inst = cur->second;
+    std::vector<MemRange> ranges;
+    ranges.reserve(m_hash.size());
 
-       // Only report those we intended to.
-       // So far, only metadata is excluded!
-       //
-       if (inst->noReport == 0)
-       {
-           cbTotal += inst->size;
-           HRESULT hr = pCallBack->EnumMemoryRegion(TO_CDADDR(inst->addr), inst->size);
-           if (hr == COR_E_OPERATIONCANCELED)
-           {
-               ThrowHR(hr);
-           }
-       }
+    DacInstanceHashIterator end = m_hash.end();
+    for (DacInstanceHashIterator cur = m_hash.begin(); end != cur; ++cur)
+    {
+        inst = cur->second;
 
-#if defined(DAC_MEASURE_PERF)
-       numInBucket++;
-#endif // #if defined(DAC_MEASURE_PERF)
-   }
+        // Only report those we intended to.
+        // So far, only metadata is excluded!
+        if (inst->noReport == 0)
+        {
+            ranges.push_back({ inst->addr, inst->size });
+        }
+    }
 
-#if defined(DAC_MEASURE_PERF)
-    fprintf(fp, "\n\nTotal entries: %d\n\n", numInBucket);
-    fclose(fp);
-#endif // #if defined(DAC_MEASURE_PERF)
+    // Sort by start address.
+    std::sort(ranges.begin(), ranges.end(),
+        [](const MemRange& a, const MemRange& b) { return a.start < b.start; });
+
+    // Walk the sorted list and coalesce overlapping or adjacent regions,
+    // then report each merged region to the callback.
+    size_t i = 0;
+    while (i < ranges.size())
+    {
+        TADDR mergedStart = ranges[i].start;
+        TADDR mergedEnd = mergedStart + ranges[i].size;
+        i++;
+
+        // Absorb all subsequent ranges that overlap or are adjacent.
+        while (i < ranges.size() && ranges[i].start <= mergedEnd)
+        {
+            TADDR candidateEnd = ranges[i].start + ranges[i].size;
+            if (candidateEnd > mergedEnd)
+            {
+                mergedEnd = candidateEnd;
+            }
+            i++;
+        }
+
+        ULONG32 mergedSize = (ULONG32)(mergedEnd - mergedStart);
+        cbTotal += mergedSize;
+        HRESULT hr = pCallBack->EnumMemoryRegion(TO_CDADDR(mergedStart), mergedSize);
+        if (hr == COR_E_OPERATIONCANCELED)
+        {
+            ThrowHR(hr);
+        }
+    }
 
     return cbTotal;
 

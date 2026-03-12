@@ -23,6 +23,8 @@
 #pragma push_macro("return")
 #undef return
 #include <unordered_map>
+#include <algorithm>
+#include <vector>
 #pragma pop_macro("return")
 #endif //DAC_HASHTABLE
 extern minipal_mutex g_dacMutex;
